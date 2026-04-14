@@ -8,10 +8,10 @@ import (
 	"sync/atomic"
 	"syscall"
 
-	"github.com/7574-sistemas-distribuidos/tp-coordinacion/clientregistry"
+	"github.com/7574-sistemas-distribuidos/tp-coordinacion/gateway/clientregistry"
 	"github.com/7574-sistemas-distribuidos/tp-coordinacion/common/messageprotocol/external"
 	"github.com/7574-sistemas-distribuidos/tp-coordinacion/common/middleware"
-	"github.com/7574-sistemas-distribuidos/tp-coordinacion/messagehandler"
+	"github.com/7574-sistemas-distribuidos/tp-coordinacion/gateway/messagehandler"
 )
 
 type GatewayConfig struct {
