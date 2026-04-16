@@ -3,6 +3,7 @@ package sum
 import (
 	"fmt"
 	"log/slog"
+	"sync"
 
 	"github.com/7574-sistemas-distribuidos/tp-coordinacion/common/fruititem"
 	"github.com/7574-sistemas-distribuidos/tp-coordinacion/common/messageprotocol/inner"
@@ -23,7 +24,10 @@ type SumConfig struct {
 type Sum struct {
 	inputQueue     middleware.Middleware
 	outputExchange middleware.Middleware
+	eofBroadcast   middleware.Middleware
+	eofReceiver    middleware.Middleware
 	clientMaps     map[string]map[string]fruititem.FruitItem
+	mu             sync.Mutex
 }
 
 func NewSum(config SumConfig) (*Sum, error) {
@@ -45,14 +49,43 @@ func NewSum(config SumConfig) (*Sum, error) {
 		return nil, err
 	}
 
+	// EOF broadcast exchange: publishes to all Sum routing keys
+	eofExchangeName := config.SumPrefix + "_eof"
+	allSumKeys := make([]string, config.SumAmount)
+	for i := range config.SumAmount {
+		allSumKeys[i] = fmt.Sprintf("%s_%d", config.SumPrefix, i)
+	}
+	eofBroadcast, err := middleware.CreateExchangeMiddleware(eofExchangeName, allSumKeys, connSettings)
+	if err != nil {
+		inputQueue.Close()
+		outputExchange.Close()
+		return nil, err
+	}
+
+	// EOF receiver: subscribes only to this Sum's routing key
+	ownKey := []string{fmt.Sprintf("%s_%d", config.SumPrefix, config.Id)}
+	eofReceiver, err := middleware.CreateExchangeMiddleware(eofExchangeName, ownKey, connSettings)
+	if err != nil {
+		inputQueue.Close()
+		outputExchange.Close()
+		eofBroadcast.Close()
+		return nil, err
+	}
+
 	return &Sum{
 		inputQueue:     inputQueue,
 		outputExchange: outputExchange,
+		eofBroadcast:   eofBroadcast,
+		eofReceiver:    eofReceiver,
 		clientMaps:     map[string]map[string]fruititem.FruitItem{},
 	}, nil
 }
 
 func (sum *Sum) Run() {
+	go sum.eofReceiver.StartConsuming(func(msg middleware.Message, ack, nack func()) {
+		sum.handleEof(msg, ack)
+	})
+
 	sum.inputQueue.StartConsuming(func(msg middleware.Message, ack, nack func()) {
 		sum.handleMessage(msg, ack, nack)
 	})
@@ -68,19 +101,40 @@ func (sum *Sum) handleMessage(msg middleware.Message, ack func(), nack func()) {
 	}
 
 	if isEof {
-		if err := sum.handleEndOfRecordMessage(clientId); err != nil {
-			slog.Error("While handling end of record message", "err", err)
+		// Don't process the EOF directly — broadcast it so all Sums receive it
+		if err := sum.eofBroadcast.Send(msg); err != nil {
+			slog.Error("While broadcasting EOF", "err", err, "clientId", clientId)
 		}
 		return
 	}
+
+	sum.mu.Lock()
+	defer sum.mu.Unlock()
 
 	if err := sum.handleDataMessage(clientId, fruitRecords); err != nil {
 		slog.Error("While handling data message", "err", err)
 	}
 }
 
-func (sum *Sum) handleEndOfRecordMessage(clientId string) error {
-	slog.Info("Received End Of Records message", "clientId", clientId)
+func (sum *Sum) handleEof(msg middleware.Message, ack func()) {
+	defer ack()
+
+	clientId, _, _, err := inner.DeserializeMessage(&msg)
+	if err != nil {
+		slog.Error("While deserializing EOF from exchange", "err", err)
+		return
+	}
+
+	sum.mu.Lock()
+	defer sum.mu.Unlock()
+
+	if err := sum.flushClient(clientId); err != nil {
+		slog.Error("While flushing client data", "err", err, "clientId", clientId)
+	}
+}
+
+func (sum *Sum) flushClient(clientId string) error {
+	slog.Info("Flushing client data", "clientId", clientId)
 
 	clientMap, ok := sum.clientMaps[clientId]
 	if !ok {
@@ -91,22 +145,18 @@ func (sum *Sum) handleEndOfRecordMessage(clientId string) error {
 		fruitRecord := []fruititem.FruitItem{clientMap[key]}
 		message, err := inner.SerializeMessage(clientId, fruitRecord)
 		if err != nil {
-			slog.Debug("While serializing message", "err", err)
 			return err
 		}
 		if err := sum.outputExchange.Send(*message); err != nil {
-			slog.Debug("While sending message", "err", err)
 			return err
 		}
 	}
 
 	eofMessage, err := inner.SerializeMessage(clientId, []fruititem.FruitItem{})
 	if err != nil {
-		slog.Debug("While serializing EOF message", "err", err)
 		return err
 	}
 	if err := sum.outputExchange.Send(*eofMessage); err != nil {
-		slog.Debug("While sending EOF message", "err", err)
 		return err
 	}
 
