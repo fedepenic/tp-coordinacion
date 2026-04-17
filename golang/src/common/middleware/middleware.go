@@ -39,6 +39,10 @@ type Middleware interface {
 	//Si ocurre un error interno que no puede resolverse devuelve ErrMessageMiddlewareMessage.
 	Send(msg Message) error
 
+	//Envía un mensaje a un tópico específico del exchange.
+	//En el caso de una cola, el key se ignora y se envía a la cola configurada.
+	SendWithKey(msg Message, key string) error
+
 	//Se desconecta de la cola o exchange al que estaba conectado.
 	//Si ocurre un error interno que no puede resolverse devuelve ErrMessageMiddlewareClose.
 	Close() error

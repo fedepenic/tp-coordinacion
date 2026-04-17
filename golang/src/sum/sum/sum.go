@@ -2,6 +2,7 @@ package sum
 
 import (
 	"fmt"
+	"hash/fnv"
 	"log/slog"
 	"sync"
 
@@ -22,12 +23,13 @@ type SumConfig struct {
 }
 
 type Sum struct {
-	inputQueue     middleware.Middleware
-	outputExchange middleware.Middleware
-	eofBroadcast   middleware.Middleware
-	eofReceiver    middleware.Middleware
-	clientMaps     map[string]map[string]fruititem.FruitItem
-	mu             sync.Mutex
+	inputQueue      middleware.Middleware
+	outputExchange  middleware.Middleware
+	eofBroadcast    middleware.Middleware
+	eofReceiver     middleware.Middleware
+	aggregationKeys []string
+	clientMaps      map[string]map[string]fruititem.FruitItem
+	mu              sync.Mutex
 }
 
 func NewSum(config SumConfig) (*Sum, error) {
@@ -73,11 +75,12 @@ func NewSum(config SumConfig) (*Sum, error) {
 	}
 
 	return &Sum{
-		inputQueue:     inputQueue,
-		outputExchange: outputExchange,
-		eofBroadcast:   eofBroadcast,
-		eofReceiver:    eofReceiver,
-		clientMaps:     map[string]map[string]fruititem.FruitItem{},
+		inputQueue:      inputQueue,
+		outputExchange:  outputExchange,
+		eofBroadcast:    eofBroadcast,
+		eofReceiver:     eofReceiver,
+		aggregationKeys: outputExchangeRouteKeys,
+		clientMaps:      map[string]map[string]fruititem.FruitItem{},
 	}, nil
 }
 
@@ -141,17 +144,20 @@ func (sum *Sum) flushClient(clientId string) error {
 		clientMap = map[string]fruititem.FruitItem{}
 	}
 
+	// Send each fruit to a specific Aggregator based on hash
 	for key := range clientMap {
 		fruitRecord := []fruititem.FruitItem{clientMap[key]}
 		message, err := inner.SerializeMessage(clientId, fruitRecord)
 		if err != nil {
 			return err
 		}
-		if err := sum.outputExchange.Send(*message); err != nil {
+		routingKey := sum.routingKeyForFruit(key)
+		if err := sum.outputExchange.SendWithKey(*message, routingKey); err != nil {
 			return err
 		}
 	}
 
+	// Broadcast EOF to ALL Aggregators
 	eofMessage, err := inner.SerializeMessage(clientId, []fruititem.FruitItem{})
 	if err != nil {
 		return err
@@ -162,6 +168,12 @@ func (sum *Sum) flushClient(clientId string) error {
 
 	delete(sum.clientMaps, clientId)
 	return nil
+}
+
+func (sum *Sum) routingKeyForFruit(fruit string) string {
+	h := fnv.New32a()
+	h.Write([]byte(fruit))
+	return sum.aggregationKeys[h.Sum32()%uint32(len(sum.aggregationKeys))]
 }
 
 func (sum *Sum) handleDataMessage(clientId string, fruitRecords []fruititem.FruitItem) error {
