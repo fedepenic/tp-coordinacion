@@ -116,23 +116,6 @@ func (em *ExchangeMiddleware) StopConsuming() error {
 	return nil
 }
 
-func (em *ExchangeMiddleware) SendWithKey(msg Message, key string) error {
-	if err := em.ch.PublishWithContext(
-		context.Background(),
-		em.exchange,
-		key,
-		false,
-		false,
-		amqp.Publishing{
-			ContentType: "text/plain",
-			Body:        []byte(msg.Body),
-		},
-	); err != nil {
-		return fmt.Errorf("%w: %v", ErrMessageMiddlewareMessage, err)
-	}
-	return nil
-}
-
 func (em *ExchangeMiddleware) Send(msg Message) error {
 	if len(em.keys) == 0 {
 		return ErrMessageMiddlewareMessage

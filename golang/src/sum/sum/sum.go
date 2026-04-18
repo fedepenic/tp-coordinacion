@@ -24,7 +24,7 @@ type SumConfig struct {
 
 type Sum struct {
 	inputQueue      middleware.Middleware
-	outputExchange  middleware.Middleware
+	outputExchanges map[string]middleware.Middleware
 	eofBroadcast    middleware.Middleware
 	eofReceiver     middleware.Middleware
 	aggregationKeys []string
@@ -45,10 +45,17 @@ func NewSum(config SumConfig) (*Sum, error) {
 		outputExchangeRouteKeys[i] = fmt.Sprintf("%s_%d", config.AggregationPrefix, i)
 	}
 
-	outputExchange, err := middleware.CreateExchangeMiddleware(config.AggregationPrefix, outputExchangeRouteKeys, connSettings)
-	if err != nil {
-		inputQueue.Close()
-		return nil, err
+	outputExchanges := make(map[string]middleware.Middleware, config.AggregationAmount)
+	for _, key := range outputExchangeRouteKeys {
+		ex, err := middleware.CreateExchangeMiddleware(config.AggregationPrefix, []string{key}, connSettings)
+		if err != nil {
+			inputQueue.Close()
+			for _, e := range outputExchanges {
+				e.Close()
+			}
+			return nil, err
+		}
+		outputExchanges[key] = ex
 	}
 
 	// EOF broadcast exchange: publishes to all Sum routing keys
@@ -60,7 +67,9 @@ func NewSum(config SumConfig) (*Sum, error) {
 	eofBroadcast, err := middleware.CreateExchangeMiddleware(eofExchangeName, allSumKeys, connSettings)
 	if err != nil {
 		inputQueue.Close()
-		outputExchange.Close()
+		for _, e := range outputExchanges {
+			e.Close()
+		}
 		return nil, err
 	}
 
@@ -69,14 +78,16 @@ func NewSum(config SumConfig) (*Sum, error) {
 	eofReceiver, err := middleware.CreateExchangeMiddleware(eofExchangeName, ownKey, connSettings)
 	if err != nil {
 		inputQueue.Close()
-		outputExchange.Close()
+		for _, e := range outputExchanges {
+			e.Close()
+		}
 		eofBroadcast.Close()
 		return nil, err
 	}
 
 	return &Sum{
 		inputQueue:      inputQueue,
-		outputExchange:  outputExchange,
+		outputExchanges: outputExchanges,
 		eofBroadcast:    eofBroadcast,
 		eofReceiver:     eofReceiver,
 		aggregationKeys: outputExchangeRouteKeys,
@@ -144,7 +155,7 @@ func (sum *Sum) flushClient(clientId string) error {
 		clientMap = map[string]fruititem.FruitItem{}
 	}
 
-	// Send each fruit to a specific Aggregator based on hash
+	// Send each fruit to its specific Aggregator exchange instance
 	for key := range clientMap {
 		fruitRecord := []fruititem.FruitItem{clientMap[key]}
 		message, err := inner.SerializeMessage(clientId, fruitRecord)
@@ -152,7 +163,7 @@ func (sum *Sum) flushClient(clientId string) error {
 			return err
 		}
 		routingKey := sum.routingKeyForFruit(key)
-		if err := sum.outputExchange.SendWithKey(*message, routingKey); err != nil {
+		if err := sum.outputExchanges[routingKey].Send(*message); err != nil {
 			return err
 		}
 	}
@@ -162,8 +173,10 @@ func (sum *Sum) flushClient(clientId string) error {
 	if err != nil {
 		return err
 	}
-	if err := sum.outputExchange.Send(*eofMessage); err != nil {
-		return err
+	for _, ex := range sum.outputExchanges {
+		if err := ex.Send(*eofMessage); err != nil {
+			return err
+		}
 	}
 
 	delete(sum.clientMaps, clientId)

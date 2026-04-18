@@ -90,10 +90,6 @@ func (qm *QueueMiddleware) StopConsuming() error {
 	return nil
 }
 
-func (qm *QueueMiddleware) SendWithKey(msg Message, key string) error {
-	return qm.Send(msg)
-}
-
 func (qm *QueueMiddleware) Send(msg Message) error {
 	if err := qm.ch.PublishWithContext(
 		context.Background(),
