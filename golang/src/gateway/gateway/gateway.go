@@ -135,14 +135,14 @@ loop:
 
 func (gateway *Gateway) handleClientResponse(msg middleware.Message, ack func(), nack func()) {
 	clientIndex := -1
+	fatalError := false
 
 	gateway.registry.WithLock(func(clients []clientregistry.ClientState) {
 		for i, client := range clients {
 			fruitTop, err := client.Handler.DeserializeResultMessage(&msg)
 			if err != nil {
 				slog.Debug("While reading from output queue", "err", err)
-				nack()
-				gateway.outputQueue.StopConsuming()
+				fatalError = true
 				return
 			}
 
@@ -150,6 +150,11 @@ func (gateway *Gateway) handleClientResponse(msg middleware.Message, ack func(),
 			if fruitTop == nil {
 				continue
 			}
+
+			// Mark for removal before attempting delivery: if the client
+			// disconnected mid-flight, we still want to clean up the registry
+			// and ack the message so it is not requeued in a NACK loop.
+			clientIndex = i
 
 			if err := external.WriteFruitTop(client.Conn, fruitTop); err != nil {
 				slog.Debug("While writing FRUIT_TOP message", "err", err)
@@ -164,18 +169,23 @@ func (gateway *Gateway) handleClientResponse(msg middleware.Message, ack func(),
 				slog.Debug("Expected ACK message")
 				return
 			}
-			clientIndex = i
 			return
 		}
-		slog.Warn("No client handler could process this message")
-		nack()
+		if clientIndex < 0 {
+			slog.Warn("No client handler could process this message, discarding")
+		}
 	})
+
+	if fatalError {
+		nack()
+		gateway.outputQueue.StopConsuming()
+		return
+	}
 
 	if clientIndex >= 0 {
 		gateway.registry.Remove(clientIndex)
-		ack()
-		return
 	}
+	ack()
 }
 
 func (gateway *Gateway) handleFruitRecordMessage(client clientregistry.ClientState) error {

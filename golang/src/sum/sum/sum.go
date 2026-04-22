@@ -31,7 +31,8 @@ type Sum struct {
 	clientMaps      map[string]map[string]fruititem.FruitItem
 	mu              sync.Mutex
 	cond            *sync.Cond
-	pendingData     int
+	globalPending   int
+	clientPending   map[string]int
 }
 
 func NewSum(config SumConfig) (*Sum, error) {
@@ -94,6 +95,7 @@ func NewSum(config SumConfig) (*Sum, error) {
 		eofReceiver:     eofReceiver,
 		aggregationKeys: outputExchangeRouteKeys,
 		clientMaps:      map[string]map[string]fruititem.FruitItem{},
+		clientPending:   map[string]int{},
 	}
 	s.cond = sync.NewCond(&s.mu)
 	return s, nil
@@ -114,23 +116,22 @@ func (sum *Sum) handleMessage(msg middleware.Message, ack func(), nack func()) {
 
 	// Register as in-flight before deserializing so handleEof sees it and waits
 	sum.mu.Lock()
-	sum.pendingData++
+	sum.globalPending++
 	sum.mu.Unlock()
 
 	clientId, fruitRecords, isEof, err := inner.DeserializeMessage(&msg)
 	if err != nil {
 		slog.Error("While deserializing message", "err", err)
 		sum.mu.Lock()
-		sum.pendingData--
+		sum.globalPending--
 		sum.cond.Broadcast()
 		sum.mu.Unlock()
 		return
 	}
 
 	if isEof {
-		// Decrement before broadcasting: this message doesn't touch clientMaps
 		sum.mu.Lock()
-		sum.pendingData--
+		sum.globalPending--
 		sum.cond.Broadcast()
 		sum.mu.Unlock()
 		if err := sum.eofBroadcast.Send(msg); err != nil {
@@ -139,9 +140,13 @@ func (sum *Sum) handleMessage(msg middleware.Message, ack func(), nack func()) {
 		return
 	}
 
+	// Transition from global to per-client tracking atomically, then hold the lock for processing
 	sum.mu.Lock()
+	sum.globalPending--
+	sum.clientPending[clientId]++
+	sum.cond.Broadcast()
 	defer func() {
-		sum.pendingData--
+		sum.clientPending[clientId]--
 		sum.cond.Broadcast()
 		sum.mu.Unlock()
 	}()
@@ -163,8 +168,9 @@ func (sum *Sum) handleEof(msg middleware.Message, ack func()) {
 	sum.mu.Lock()
 	defer sum.mu.Unlock()
 
-	// Wait until all in-flight data messages finish before flushing
-	for sum.pendingData > 0 {
+	// Wait until all in-flight data messages for this client finish before flushing.
+	// globalPending guards messages still being deserialized (client unknown yet).
+	for sum.globalPending > 0 || sum.clientPending[clientId] > 0 {
 		sum.cond.Wait()
 	}
 
@@ -206,6 +212,7 @@ func (sum *Sum) flushClient(clientId string) error {
 	}
 
 	delete(sum.clientMaps, clientId)
+	delete(sum.clientPending, clientId)
 	return nil
 }
 
