@@ -30,6 +30,8 @@ type Sum struct {
 	aggregationKeys []string
 	clientMaps      map[string]map[string]fruititem.FruitItem
 	mu              sync.Mutex
+	cond            *sync.Cond
+	pendingData     int
 }
 
 func NewSum(config SumConfig) (*Sum, error) {
@@ -85,14 +87,16 @@ func NewSum(config SumConfig) (*Sum, error) {
 		return nil, err
 	}
 
-	return &Sum{
+	s := &Sum{
 		inputQueue:      inputQueue,
 		outputExchanges: outputExchanges,
 		eofBroadcast:    eofBroadcast,
 		eofReceiver:     eofReceiver,
 		aggregationKeys: outputExchangeRouteKeys,
 		clientMaps:      map[string]map[string]fruititem.FruitItem{},
-	}, nil
+	}
+	s.cond = sync.NewCond(&s.mu)
+	return s, nil
 }
 
 func (sum *Sum) Run() {
@@ -108,14 +112,27 @@ func (sum *Sum) Run() {
 func (sum *Sum) handleMessage(msg middleware.Message, ack func(), nack func()) {
 	defer ack()
 
+	// Register as in-flight before deserializing so handleEof sees it and waits
+	sum.mu.Lock()
+	sum.pendingData++
+	sum.mu.Unlock()
+
 	clientId, fruitRecords, isEof, err := inner.DeserializeMessage(&msg)
 	if err != nil {
 		slog.Error("While deserializing message", "err", err)
+		sum.mu.Lock()
+		sum.pendingData--
+		sum.cond.Broadcast()
+		sum.mu.Unlock()
 		return
 	}
 
 	if isEof {
-		// Don't process the EOF directly — broadcast it so all Sums receive it
+		// Decrement before broadcasting: this message doesn't touch clientMaps
+		sum.mu.Lock()
+		sum.pendingData--
+		sum.cond.Broadcast()
+		sum.mu.Unlock()
 		if err := sum.eofBroadcast.Send(msg); err != nil {
 			slog.Error("While broadcasting EOF", "err", err, "clientId", clientId)
 		}
@@ -123,7 +140,11 @@ func (sum *Sum) handleMessage(msg middleware.Message, ack func(), nack func()) {
 	}
 
 	sum.mu.Lock()
-	defer sum.mu.Unlock()
+	defer func() {
+		sum.pendingData--
+		sum.cond.Broadcast()
+		sum.mu.Unlock()
+	}()
 
 	if err := sum.handleDataMessage(clientId, fruitRecords); err != nil {
 		slog.Error("While handling data message", "err", err)
@@ -141,6 +162,11 @@ func (sum *Sum) handleEof(msg middleware.Message, ack func()) {
 
 	sum.mu.Lock()
 	defer sum.mu.Unlock()
+
+	// Wait until all in-flight data messages finish before flushing
+	for sum.pendingData > 0 {
+		sum.cond.Wait()
+	}
 
 	if err := sum.flushClient(clientId); err != nil {
 		slog.Error("While flushing client data", "err", err, "clientId", clientId)
