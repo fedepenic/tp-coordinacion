@@ -7,9 +7,9 @@ COPY go.mod .
 COPY go.sum .
 COPY common ./common
 RUN go mod download
-COPY gateway ./gateway
+COPY gateway .
 # CGO_ENABLED must be disabled to run go binary in Alpine
-RUN CGO_ENABLED=0 GOOS=linux go build -o bin/gateway ./gateway
+RUN CGO_ENABLED=0 GOOS=linux go build -o bin/gateway
 
 FROM busybox:latest
 COPY --from=builder /build/bin/gateway /gateway

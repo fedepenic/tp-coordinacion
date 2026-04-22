@@ -7,9 +7,9 @@ COPY go.mod .
 COPY go.sum .
 COPY common ./common
 RUN go mod download
-COPY join ./join
+COPY join .
 # CGO_ENABLED must be disabled to run go binary in Alpine
-RUN CGO_ENABLED=0 GOOS=linux go build -o bin/join ./join
+RUN CGO_ENABLED=0 GOOS=linux go build -o bin/join
 
 FROM busybox:latest
 COPY --from=builder /build/bin/join /join

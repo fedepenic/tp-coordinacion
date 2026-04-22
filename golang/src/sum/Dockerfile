@@ -7,9 +7,9 @@ COPY go.mod .
 COPY go.sum .
 COPY common ./common
 RUN go mod download
-COPY sum ./sum
+COPY sum .
 # CGO_ENABLED must be disabled to run go binary in Alpine
-RUN CGO_ENABLED=0 GOOS=linux go build -o bin/sum ./sum
+RUN CGO_ENABLED=0 GOOS=linux go build -o bin/sum
 
 FROM busybox:latest
 COPY --from=builder /build/bin/sum /sum
