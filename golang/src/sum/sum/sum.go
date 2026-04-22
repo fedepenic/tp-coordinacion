@@ -4,7 +4,10 @@ import (
 	"fmt"
 	"hash/fnv"
 	"log/slog"
+	"os"
+	"os/signal"
 	"sync"
+	"syscall"
 
 	"github.com/7574-sistemas-distribuidos/tp-coordinacion/common/fruititem"
 	"github.com/7574-sistemas-distribuidos/tp-coordinacion/common/messageprotocol/inner"
@@ -105,10 +108,21 @@ func (sum *Sum) Run() {
 	go sum.eofReceiver.StartConsuming(func(msg middleware.Message, ack, nack func()) {
 		sum.handleEof(msg, ack)
 	})
+	go sum.handleSignals()
 
 	sum.inputQueue.StartConsuming(func(msg middleware.Message, ack, nack func()) {
 		sum.handleMessage(msg, ack, nack)
 	})
+
+	sum.eofReceiver.StopConsuming()
+}
+
+func (sum *Sum) handleSignals() {
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+	<-signals
+	slog.Info("SIGTERM signal received")
+	sum.inputQueue.StopConsuming()
 }
 
 func (sum *Sum) handleMessage(msg middleware.Message, ack func(), nack func()) {
