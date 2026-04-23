@@ -52,6 +52,10 @@ func NewQueueMiddleware(queueName string, connectionSettings ConnSettings) (Midd
 }
 
 func (qm *QueueMiddleware) StartConsuming(callbackFunc func(msg Message, ack func(), nack func())) error {
+	if err := qm.ch.Qos(1, 0, false); err != nil {
+		return fmt.Errorf("%w: %v", ErrMessageMiddlewareMessage, err)
+	}
+
 	deliveries, err := qm.ch.Consume(
 		qm.queueName,
 		"",

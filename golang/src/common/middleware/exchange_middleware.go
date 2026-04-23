@@ -78,6 +78,10 @@ func NewExchangeMiddleware(exchange string, keys []string, connectionSettings Co
 }
 
 func (em *ExchangeMiddleware) StartConsuming(callbackFunc func(msg Message, ack func(), nack func())) error {
+	if err := em.ch.Qos(1, 0, false); err != nil {
+		return fmt.Errorf("%w: %v", ErrMessageMiddlewareMessage, err)
+	}
+
 	deliveries, err := em.ch.Consume(
 		em.queueName,
 		"",
